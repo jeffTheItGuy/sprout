@@ -1,0 +1,65 @@
+{{- if and .Values.ingress .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: sprout-ingress
+  namespace: {{ .Values.namespace | default "default" }}
+  labels:
+    app: sprout
+  annotations:
+    # Attach HTTPS redirect middleware
+    traefik.ingress.kubernetes.io/router.middlewares: {{ .Values.namespace }}-force-https@kubernetescrd,{{ .Values.namespace }}-redirect-www@kubernetescrd
+    # Entry points
+    traefik.ingress.kubernetes.io/router.entrypoints: web,websecure
+    # SSL/TLS certificate
+    cert-manager.io/cluster-issuer: {{ .Values.ssl.clusterIssuer | default "letsencrypt-prod" }}
+spec:
+  ingressClassName: {{ .Values.ingress.ingressClassName | default "traefik" }}
+
+  {{- if and .Values.ssl.enabled .Values.domain }}
+  tls:
+    - hosts:
+        - {{ .Values.domain }}
+        - www.{{ .Values.domain }}
+      secretName: {{ .Values.ssl.secretName | default "sprout-tls-secret" }}
+  {{- end }}
+
+  rules:
+    # Main domain rules
+    - host: {{ .Values.domain | default "sprout.local" }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend-service
+                port:
+                  number: {{ .Values.frontend.service.port }}
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: backend-service
+                port:
+                  number: {{ .Values.backend.service.port }}
+    
+    # WWW subdomain rules (needed for redirect to work)
+    - host: www.{{ .Values.domain | default "sprout.local" }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend-service
+                port:
+                  number: {{ .Values.frontend.service.port }}
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: backend-service
+                port:
+                  number: {{ .Values.backend.service.port }}
+{{- end }}

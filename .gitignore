@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+.venv/
+venv/
+env/
+instance/
+*.db
+*.sqlite3
+
+# Node.js
+node_modules/
+dist/
+*.log
+.env.local
+.env.development
+.env.production
+
+# Docker
+*.pid
+*.sock
+docker-compose.override.yml
+
+# VSCode / IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Coverage / testing
+htmlcov/
+.coverage
+coverage.xml
+pytest_cache/
+
+# Build artifacts
+build/
+frontend/.next/
+frontend/out/
+frontend/.turbo/
+frontend/.vite/
+
+# Logs
+logs/
+*.log

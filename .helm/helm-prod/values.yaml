@@ -1,0 +1,114 @@
+# =========================================
+#  Global Settings
+# =========================================
+namespace: sprout
+
+#  Domain & Ingress
+domain: sprout.local  # Change in production
+
+ingress:
+  enabled: true
+  ingressClassName: traefik
+
+#  SSL/TLS
+ssl:
+  enabled: true
+  clusterIssuer: sprout-letsencrypt-prod
+  secretName: sprout-tls-secret
+  email: myemail@gmail.com
+  securityHeaders: false
+
+# ===================================================
+#  Frontend Configuration
+# ===================================================
+frontend:
+  replicaCount: 1
+  image:
+    repository: ghcr.io/your-github-org/sprout-frontend
+    tag: latest
+    pullPolicy: Always
+  imagePullSecrets:
+    - name: ghcr-secret
+  service:
+    port: 80
+  # Frontend environment variables
+  env:
+    # Force HTTPS URLs in frontend
+    VITE_FORCE_HTTPS: "true"
+    VITE_BACKEND_URL: "https://{{ .Values.domain }}/api"
+
+# ===================================================
+#  Backend Configuration
+# ===================================================
+backend:
+  replicaCount: 1
+  image:
+    repository: ghcr.io/your-github-org/sprout-backend
+    tag: latest
+    pullPolicy: Always
+  imagePullSecrets:
+    - name: ghcr-secret
+  env:
+    ALLOWED_ORIGINS: "https://{{ .Values.domain }}"
+    NAMESPACE: sprout
+    # Force HTTPS in backend
+    FORCE_HTTPS: "true"
+  service:
+    port: 8000
+
+# ===================================================
+#  Redis Configuration
+# ===================================================
+redis:
+  image:
+    repository: redis
+    tag: "7"
+  service:
+    port: 6379
+  auth:
+    enabled: true
+    passwordSecretName: redis-secret
+    passwordKey: redis-password
+
+# ===================================================
+#  Worker Configuration
+# ===================================================
+worker:
+  replicaCount: 1
+  image:
+    repository: ghcr.io/your-github-org/sprout-worker
+    tag: latest
+    pullPolicy: Always
+  imagePullSecrets:
+    - name: ghcr-secret
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "256Mi"
+      cpu: "200m"
+
+# ===================================================
+#  KEDA Configuration
+# ===================================================
+keda:
+  enabled: true
+  triggerType: redis-streams
+  streamName: container_events
+  consumerGroup: keda-consumer
+  pollingInterval: 30
+  batchSize: 1
+  pendingEntriesCount: "1"
+  lagThreshold: "2"
+
+# ===================================================
+#  RBAC Configuration
+# ===================================================
+rbac:
+  enabled: true
+  clusterRoleName: sprout-container-worker-role
+  serviceAccount:
+    create: true
+    name: sprout-container-worker-sa
+    annotations: {}

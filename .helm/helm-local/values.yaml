@@ -1,0 +1,116 @@
+# ===================================================
+# 🌐 Frontend Configuration
+# ===================================================
+frontend:
+  replicaCount: 1
+  image:
+    repository: frontend
+    tag: prod
+    pullPolicy: Never
+  service:
+    port: 80
+  ingress:
+    enabled: true
+    hosts:
+      - host: sprout.local
+        paths:
+          - path: /
+            pathType: Prefix
+    annotations:
+      kubernetes.io/ingress.class: "traefik"
+  resources:
+    requests:
+      memory: "64Mi"
+      cpu: "50m"
+    limits:
+      memory: "128Mi"
+      cpu: "100m"
+
+# ===================================================
+# ⚙️ Backend Configuration
+# ===================================================
+backend:
+  replicaCount: 1
+  env:
+    ALLOWED_ORIGINS: "sprout.local,http://localhost:8080"
+    REDIS_PASSWORD: yourStrongPassword
+    NAMESPACE: sprout
+  image:
+    repository: backend
+    tag: prod
+    pullPolicy: Never
+  service:
+    port: 8000
+  ingress:
+    enabled: true
+    hosts:
+      - host: sprout.local
+        paths:
+          - path: /api
+            pathType: Prefix
+    annotations:
+      kubernetes.io/ingress.class: "traefik"
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "256Mi"
+      cpu: "200m"
+  
+
+# ===================================================
+# 🧠 Redis Configuration
+# ===================================================
+redis:
+  image:
+    repository: redis
+    tag: "7"
+  service:
+    port: 6379
+  auth:
+    enabled: true
+    passwordSecretName: redis-secret
+    passwordKey: redis-password
+
+# ===================================================
+# 🐣 Worker Configuration
+# ===================================================
+worker:
+  replicaCount: 1
+  image:
+    repository: worker
+    tag: prod
+    pullPolicy: Never
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "256Mi"
+      cpu: "200m"
+
+# ===================================================
+# 🔧 KEDA Configuration (Event-Driven Autoscaling)
+# ===================================================
+keda:
+  enabled: true
+  triggerType: redis-streams
+  streamName: container_events
+  consumerGroup: keda-consumer
+  # Polling interval in ms
+  pollingInterval: 30
+  # Amount of data to read per poll
+  batchSize: 1
+  # Lag threshold to scale on
+  pendingEntriesCount: "1"
+  lagThreshold: "2"
+
+# ===================================================
+# 🔐 RBAC Configuration
+# ===================================================
+rbac:
+  enabled: true
+  serviceAccount:
+    create: true
+    name: container-worker-sa

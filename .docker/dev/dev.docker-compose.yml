@@ -1,0 +1,54 @@
+services:
+  frontend-dev:
+    build:
+      context: ../../
+      dockerfile: .docker/dev/devfrontend.Dockerfile
+      args:
+        UID: ${UID:-1000}
+        GID: ${GID:-1000}
+    volumes:
+      - type: bind
+        source: ../../
+        target: /workspace
+        consistency: cached
+    working_dir: /workspace
+    ports:
+      - "5173:5173"
+    environment:
+      - CHOKIDAR_USEPOLLING=true
+    command: tail -f /dev/null
+    depends_on:
+      - backend-dev
+
+  backend-dev:
+    build:
+      context: ../../
+      dockerfile: .docker/dev/devbackend.Dockerfile
+      args:
+        UID: ${UID:-1000}
+        GID: ${GID:-1000}
+    volumes:
+      - type: bind
+        source: ../../
+        target: /workspace
+        consistency: cached
+    working_dir: /workspace
+    ports:
+      - "8000:8000"
+    environment:
+      - FASTAPI_HOST=0.0.0.0
+      - FASTAPI_PORT=8000
+    command: tail -f /dev/null
+
+
+  redis:
+    image: redis:6
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+
+volumes:
+  redis-data:
+
+    

@@ -1,0 +1,239 @@
+name: $(Build.SourceBranchName)
+
+trigger: none
+
+pool:
+  name: Default 
+
+variables:
+  - group: k3s-deployment-vars   
+  - name: FRONTEND_IMAGE
+    value: '$(REGISTRY)/$(REGISTRY_USER)/sprout-frontend:latest'
+  - name: BACKEND_IMAGE
+    value: '$(REGISTRY)/$(REGISTRY_USER)/sprout-backend:latest'
+  - name: WORKER_IMAGE
+    value: '$(REGISTRY)/$(REGISTRY_USER)/sprout-worker:latest'
+
+  - name: FRONTEND_DOCKERFILE
+    value: '.docker/prod/prodfrontend.Dockerfile'
+  - name: BACKEND_DOCKERFILE
+    value: '.docker/prod/prodbackend.Dockerfile'
+  - name: WORKER_DOCKERFILE
+    value: '.docker/prod/prodworker.Dockerfile'
+
+steps:
+# Checkout full repo with LFS support
+- checkout: self
+  persistCredentials: true
+  clean: true
+  fetchDepth: 0
+  lfs: true
+
+
+- script: |
+    echo " Running explicit git lfs pull to fetch LFS files"
+    git lfs pull
+  displayName: 'Fetch Git LFS files explicitly'
+
+
+- script: |
+    echo " Configuring Git user..."
+    git config user.name "$REGISTRY_USER"
+    git config user.email "$LETSENCRYPT_EMAIL"
+
+    echo " Setting up GitHub remote..."
+    git remote remove github 2>/dev/null || echo "No existing github remote to remove"
+    git remote add github https://$(REGISTRY_USER):$(GHCR_TOKEN)@github.com/$(REGISTRY_USER)/sprout.git
+
+    echo " Identifying problematic LFS objects..."
+    git lfs fsck 2>&1 | head -5 || true
+
+    echo " Creating fresh commit without LFS issues..."
+    # Create a new orphan branch to start clean
+    git checkout --orphan temp-backup
+    
+    # Add all current files (LFS pointers will be added as regular files)
+    git add .
+    
+    # Commit current state
+    git commit -m "Fresh backup from Azure DevOps - $(date)"
+    
+    echo " Pushing fresh backup to GitHub..."
+    git push github temp-backup:main --force
+    
+    echo " Backup completed successfully!"
+    echo " Note: LFS objects were not transferred due to corruption"
+    echo " Code and structure have been backed up successfully"
+  displayName: 'Backup Azure Repo to GitHub (Fresh Start)'
+  env:
+    GHCR: $(GHCR_TOKEN)
+
+
+# Download kubeconfig secure file
+- task: DownloadSecureFile@1
+  name: downloadKubeconfig
+  inputs:
+    secureFile: 'k3s.yml'
+
+# Generate BUILD_TAG dynamically
+- script: |
+    echo " Generating timestamp for BUILD_TAG..."
+    BUILD_DATE=$(date +%Y%m%d%H%M%S)
+    BUILD_TAG="$(Build.BuildId)-$BUILD_DATE"
+    echo "Generated BUILD_TAG: $BUILD_TAG"
+    echo "##vso[task.setvariable variable=BUILD_TAG]$BUILD_TAG"
+  displayName: 'Generate BUILD_TAG with timestamp'
+
+# Verify remote cluster access
+- script: |
+    echo " Setting KUBECONFIG to downloaded secure file..."
+    export KUBECONFIG=$(Agent.TempDirectory)/k3s.yml
+
+    echo " Verifying remote cluster access..."
+    kubectl config get-contexts
+    kubectl get nodes
+  displayName: 'Setup and Verify Remote Kubeconfig'
+
+# Build and push Docker images (Frontend, Backend, Worker)
+- script: |
+    set -e
+    echo " Logging into GHCR..."
+    echo $(GHCR_TOKEN) | docker login $(REGISTRY) -u $(REGISTRY_USER) --password-stdin
+    
+    echo " Building frontend image..."
+    docker build -f $(FRONTEND_DOCKERFILE) -t $(REGISTRY)/$(REGISTRY_USER)/sprout-frontend:$(BUILD_TAG) .
+    
+    echo " Pushing frontend image..."
+    docker push $(REGISTRY)/$(REGISTRY_USER)/sprout-frontend:$(BUILD_TAG)
+    
+    echo " Building backend image..."
+    docker build -f $(BACKEND_DOCKERFILE) -t $(REGISTRY)/$(REGISTRY_USER)/sprout-backend:$(BUILD_TAG) .
+    
+    echo " Pushing backend image..."
+    docker push $(REGISTRY)/$(REGISTRY_USER)/sprout-backend:$(BUILD_TAG)
+    
+    echo " Building worker image..."
+    docker build -f $(WORKER_DOCKERFILE) -t $(REGISTRY)/$(REGISTRY_USER)/sprout-worker:$(BUILD_TAG) .
+    
+    echo " Pushing worker image..."
+    docker push $(REGISTRY)/$(REGISTRY_USER)/sprout-worker:$(BUILD_TAG)
+    
+    echo " All images built and pushed successfully!"
+  displayName: 'Build and Push Docker Images'
+  env:
+    GHCR_TOKEN: $(GHCR_TOKEN)
+    BUILD_TAG: $(BUILD_TAG)
+
+# Create Redis secret
+- script: |
+    set -e
+    export KUBECONFIG=$(Agent.TempDirectory)/k3s.yml
+    
+    echo " Creating Redis password secret..."
+    kubectl create namespace $(NAMESPACE) --dry-run=client -o yaml | kubectl apply -f -
+    
+    kubectl create secret generic redis-secret \
+      --namespace $(NAMESPACE) \
+      --from-literal=redis-password="$(REDIS_PASSWORD)" \
+      --dry-run=client -o yaml | kubectl apply -f -
+    
+    echo " Redis secret created/updated"
+  displayName: 'Create Redis Secret'
+  env:
+    REDIS_PASSWORD: $(REDIS_PASSWORD)
+
+# Deploy Helm chart using remote kubeconfig - MODERN INGRESS VERSION
+- script: |
+    set -e
+    export KUBECONFIG=$(Agent.TempDirectory)/k3s.yml
+
+    echo " Cleaning up conflicting resources and stuck Helm operations..."
+    
+    # Clean up old releases and conflicting resources safely
+    if helm list -A | grep -q "my-release"; then
+        echo "  Active 'my-release' found - using unique names to avoid conflicts"
+    else
+        echo " No conflicting releases found - safe to clean up orphaned resources"
+        kubectl delete clusterrole container-worker-role --ignore-not-found=true
+        kubectl delete clusterrolebinding container-worker-binding --ignore-not-found=true
+    fi
+    
+    helm rollback $(RELEASE_NAME) 0 --namespace $(NAMESPACE) 2>/dev/null || echo "No rollback needed"
+    kubectl delete secret -l owner=helm,name=$(RELEASE_NAME) -n $(NAMESPACE) 2>/dev/null || echo "No helm secrets to clean"
+    
+    echo " Creating namespace and image pull secret for GHCR..."
+    kubectl create namespace $(NAMESPACE) --dry-run=client -o yaml | kubectl apply -f -
+    
+    kubectl create secret docker-registry ghcr-secret \
+      --namespace $(NAMESPACE) \
+      --docker-server=$(REGISTRY) \
+      --docker-username=$(REGISTRY_USER) \
+      --docker-password=$(GHCR_TOKEN) \
+      --dry-run=client -o yaml | kubectl apply -f -
+
+    cat <<EOF > /tmp/overrides.yaml
+    backend:
+      env:
+        ALLOWED_ORIGINS: "https://www.${DOMAIN},https://${DOMAIN}"
+    EOF
+    
+    
+    echo " Starting Helm deployment with modern ingress configuration..."
+    helm upgrade --install $(RELEASE_NAME) .helm/helm-prod \
+      --namespace $(NAMESPACE) \
+      --set frontend.image.repository=$(REGISTRY)/$(REGISTRY_USER)/sprout-frontend \
+      --set frontend.image.tag=$(BUILD_TAG) \
+      --set backend.image.repository=$(REGISTRY)/$(REGISTRY_USER)/sprout-backend \
+      --set backend.image.tag=$(BUILD_TAG) \
+      --set worker.image.repository=$(REGISTRY)/$(REGISTRY_USER)/sprout-worker \
+      --set worker.image.tag=$(BUILD_TAG) \
+      --set domain=$(DOMAIN) \
+      --set ingress.enabled=true \
+      --set ssl.enabled=true \
+      --set ssl.email=$(LETSENCRYPT_EMAIL) \
+      --set ssl.clusterIssuer=sprout-letsencrypt-prod \
+      -f /tmp/overrides.yaml \
+      --force \
+      --timeout=300s \
+      --wait \
+      --set frontend.image.pullPolicy=Always \
+      --set backend.image.pullPolicy=Always \
+      --set worker.image.pullPolicy=Always
+    
+    echo " Helm deployment completed with modern ingress configuration!"
+    
+    echo " Deployment Summary:"
+    kubectl get all -n $(NAMESPACE)
+    echo ""
+    echo " Ingress Resources:"
+    kubectl get ingress -n $(NAMESPACE)
+    kubectl describe ingress -n $(NAMESPACE)
+    echo ""
+    
+    
+  displayName: 'Modern Clean and Deploy with Helm'
+  env:
+    REGISTRY_USER: $(REGISTRY_USER)
+    GHCR_TOKEN: $(GHCR_TOKEN)
+    BUILD_TAG: $(BUILD_TAG)
+    DOMAIN: $(DOMAIN)
+    LETSENCRYPT_EMAIL: $(LETSENCRYPT_EMAIL)
+
+
+- script: |
+    echo " DEPLOYMENT SUCCESS! "
+    echo "=========================================="
+    echo " Application successfully deployed!"
+    echo " Build Tag: $(BUILD_TAG)"
+    echo " Domain: $(DOMAIN)"
+    echo " Namespace: $(NAMESPACE)"
+    echo " Release: $(RELEASE_NAME)"
+    echo "=========================================="
+    echo " Your application is now available at: https://$(DOMAIN)"
+    echo " API endpoint: https://$(DOMAIN)/api"
+    echo "=========================================="
+    echo " Deployment completed successfully!"
+  displayName: ' Deployment Success Message'
+  env:
+    BUILD_TAG: $(BUILD_TAG)
+    DOMAIN: $(DOMAIN)
